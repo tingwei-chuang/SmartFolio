@@ -51,8 +51,11 @@ class MHGraphAttn(Module):
         f_2 = torch.matmul(support, self.weight_v).reshape(batch, self.num_heads, -1, 1)
         logits = f_1 + f_2
         weight = self.leaky_relu(logits)    # (batch_size, num_heads, num_nodes, num_nodes)
-        masked_weight = torch.matmul(weight, adj_mat.unsqueeze(1)).to_sparse()
-        attn_weights = torch.sparse.softmax(masked_weight, dim=3).to_dense()
+        # graph-masked attention weights; the original code routed a fully dense
+        # tensor through torch.sparse.softmax (identical result, far slower) —
+        # a plain dense softmax over dim 3 is mathematically equivalent.
+        masked_weight = torch.matmul(weight, adj_mat.unsqueeze(1))
+        attn_weights = torch.softmax(masked_weight, dim=3)
         support = torch.matmul(attn_weights, support)   # (batch_size,num_heads, num_nodes, hidden_size)
         support = support.permute(dims=(0, 2, 1, 3)).reshape(batch, -1, self.num_heads * self.out_features)
         if self.bias is not None:
@@ -109,6 +112,7 @@ class HGAT(nn.Module):
     def __init__(self, num_stocks, n_features=8, num_heads=8, hidden_dim=512, no_ind=False, no_neg=False):
         super(HGAT, self).__init__()
         self.num_heads = num_heads
+        self.num_stocks = num_stocks
         self.n_adj_mat = num_stocks
         self.in_features = n_features
         self.out_features = n_features
@@ -142,20 +146,23 @@ class HGAT(nn.Module):
 
     def forward(self, inputs, require_weights=False):
         batch = inputs.shape[0]
+        N = self.num_stocks
+        d = self.in_features
+        # SB3 flattens the observation; restore the [B, N, d + 3N] layout used
+        # by the environment: per stock = [features(d), ind_row(N), pos_row(N), neg_row(N)]
+        inputs = inputs.reshape(batch, N, -1)
+        node_feat = inputs[:, :, :d]                                  # [B, N, d]
+        ind_adj = inputs[:, :, d:d + N].contiguous()                  # [B, N, N]
+        pos_adj = inputs[:, :, d + N:d + 2 * N].contiguous()          # [B, N, N]
+        neg_adj = inputs[:, :, d + 2 * N:d + 3 * N].contiguous()      # [B, N, N]
 
-        inputs = inputs.reshape(batch, -1, self.n_adj_mat)
-        ind_adj = inputs[:, :self.n_adj_mat, :]
-        pos_adj = inputs[:, self.n_adj_mat:self.n_adj_mat * 2, :]
-        neg_adj = inputs[:, self.n_adj_mat * 2:self.n_adj_mat * 3, :]
-        inputs = inputs[:, self.n_adj_mat * 3:, :].permute(dims=(0, 2, 1))
-
-        support = self.mlp_self1(inputs)
+        support = self.mlp_self1(node_feat)
         ind_support, ind_attn_weights = self.ind_gat(support, ind_adj, require_weights)
         pos_support, pos_attn_weights = self.pos_gat(support, pos_adj, require_weights)
         neg_support, neg_attn_weights = self.neg_gat(support, neg_adj, require_weights)
         support = self.mlp_self2(support)
         ind_support = self.ind_mlp(ind_support)
-        pos_support = self.pos_mlp(neg_support)
+        pos_support = self.pos_mlp(pos_support)
         neg_support = self.neg_mlp(neg_support)
         all_embedding = torch.stack((support, ind_support, pos_support, neg_support),
                                     dim=1)
