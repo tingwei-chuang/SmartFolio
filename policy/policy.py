@@ -6,48 +6,41 @@ import torch as th
 import torch.nn as nn
 from stable_baselines3.common.policies import ActorCriticPolicy
 
-from model import HGAT
+from model.model import HGAT
 
 
 class HGATNetwork(nn.Module):
+    """Custom mlp_extractor that uses the heterogeneous graph attention
+    network (paper section 3.4) as the shared trunk of the actor-critic.
+
+    SB3 flattens the Box observation; we recover the [N, d + 3N] layout
+    inside ``HGAT.forward``. The trunk emits an N-dim latent for both the
+    policy and value heads (SB3 adds the final Linear action/value heads).
     """
-    Custom network for policy and value function.
-    It receives as input the features extracted by the feature extractor.
-    :param feature_dim: dimension of the features extracted with the features_extractor (e.g. features from a CNN)
-    :param last_layer_dim_pi: (int) number of units for the last layer of the policy network
-    :param last_layer_dim_vf: (int) number of units for the last layer of the value network
-    """
-    def __init__(
-            self,
-            feature_dim: int,
-            last_layer_dim_pi: int = 64,
-            last_layer_dim_vf: int = 64,
-            n_head=8,
-            hidden_dim=128,
-            no_ind=False,
-            no_neg=False,
-    ):
+
+    def __init__(self, observation_space: gym.spaces.Box,
+                 n_head: int = 8, hidden_dim: int = 128,
+                 no_ind: bool = False, no_neg: bool = False):
         super(HGATNetwork, self).__init__()
-        # IMPORTANT:
-        # Save output dimensions, used to create the distributions
-        self.latent_dim_pi = last_layer_dim_pi
-        self.latent_dim_vf = last_layer_dim_vf
+        num_stocks, obs_len = observation_space.shape
+        input_dim = obs_len - 3 * num_stocks
+        assert input_dim > 0, (
+            f"HGAT expects obs layout [N, d + 3N]; got N={num_stocks}, obs_len={obs_len}. "
+            f"All three relation graphs (ind/pos/neg) must be enabled for the HGAT policy."
+        )
+        self.num_stocks = num_stocks
+        # SB3 reads these to size the action/value heads
+        self.latent_dim_pi = num_stocks
+        self.latent_dim_vf = num_stocks
 
-        self.num_stocks = last_layer_dim_pi
-        self.n_features = feature_dim - self.num_stocks * 2
-
-        self.policy_net = HGAT(num_stocks=self.num_stocks, n_features=self.n_features,
+        self.policy_net = HGAT(num_stocks=num_stocks, n_features=input_dim,
                                num_heads=n_head, hidden_dim=hidden_dim,
                                no_ind=no_ind, no_neg=no_neg)
-        self.value_net = HGAT(num_stocks=self.num_stocks, n_features=self.n_features,
+        self.value_net = HGAT(num_stocks=num_stocks, n_features=input_dim,
                               num_heads=n_head, hidden_dim=hidden_dim,
                               no_ind=no_ind, no_neg=no_neg)
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-            :return: (th.Tensor, th.Tensor) latent_policy, latent_value of     the specified network.
-            If all layers are shared, then ``latent_policy == latent_value``
-            """
         return self.policy_net(features), self.value_net(features)
 
     def forward_actor(self, features: torch.Tensor) -> torch.Tensor:
@@ -55,6 +48,7 @@ class HGATNetwork(nn.Module):
 
     def forward_critic(self, features: torch.Tensor) -> torch.Tensor:
         return self.value_net(features)
+
 
 class HGATActorCriticPolicy(ActorCriticPolicy):
     def __init__(self,
@@ -66,39 +60,25 @@ class HGATActorCriticPolicy(ActorCriticPolicy):
                  *args,
                  **kwargs,
                  ):
+        # HGAT does its own Xavier init; skip SB3 orthogonal init of the trunk
+        kwargs['ortho_init'] = False
         super(HGATActorCriticPolicy, self).__init__(
             observation_space,
             action_space,
             lr_schedule,
             net_arch,
             activation_fn,
-            # Pass remaining arguments to base class
             *args,
             **kwargs,
         )
-        # Disable orthogonal initialization
-        self.ortho_init = False
 
     def _build_mlp_extractor(self) -> None:
-        self.mlp_extractor = HGATNetwork(last_layer_dim_pi=self.action_space.shape[0],
-                                         last_layer_dim_vf=self.action_space.shape[0],
-                                         feature_dim=self.observation_space.shape[0],
-                                         )
+        self.mlp_extractor = HGATNetwork(self.observation_space,
+                                         n_head=8, hidden_dim=128)
 
     def forward(self, obs: th.Tensor, deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
-        actions, values, log_prob = super().forward(obs, deterministic)
-        return actions, values, log_prob
+        return super().forward(obs, deterministic)
 
     def _predict(self, observation, deterministic: bool = False) -> th.Tensor:
-        """
-        Get the action according to the policy for a given observation.
-
-        By default provides a dummy implementation -- not all BasePolicy classes
-        implement this, e.g. if they are a Critic in an Actor-Critic method.
-
-        :param observation:
-        :param deterministic: Whether to use stochastic or deterministic actions
-        :return: Taken action according to the policy
-        """
-        actions, values, log_prob = self.forward(observation, deterministic)
+        actions, _, _ = self.forward(observation, deterministic)
         return actions

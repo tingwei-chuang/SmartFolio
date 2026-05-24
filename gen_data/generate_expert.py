@@ -60,7 +60,6 @@ def generate_expert_trajectories(args, dataset, num_trajectories=100):
     :return: 专家轨迹列表，每个轨迹为 (state, action) 的序列。
     """
     expert_trajectories = []
-    industry_relation_matrix = load_industry_relation_matrix(args.market)  # 加载行业关系矩阵
 
     for _ in range(num_trajectories):
         # 随机选择一个数据点,每个数据点已包含完整的时序特征
@@ -68,20 +67,20 @@ def generate_expert_trajectories(args, dataset, num_trajectories=100):
         data = dataset[idx]
 
         # 提取时序特征和相关性矩阵
-        time_series_features = data['ts_features'].numpy()  # 形状为 [股票数量, 时间步长, 特征维度]
         features = data['features'].numpy()  # 形状为 [股票数量, 特征维度]
         correlation_matrix = data['corr'].numpy()  # 形状为 [股票数量, 股票数量]
+        # 行业关系矩阵直接取自预处理好的样本（每个 .pkl 已包含 industry_matrix）
         ind_matrix = data['industry_matrix'].numpy()  # 形状为 [股票数量, 股票数量]
         pos_matrix = data['pos_matrix'].numpy()  # 形状为 [股票数量, 股票数量]
         neg_matrix = data['neg_matrix'].numpy()  # 形状为 [股票数量, 股票数量]
 
-        # 从时序特征中提取收益率（假设最后一列为收益率）
-        returns = data['labels'].numpy()  # 转换为 [时间步长, 1]
+        # 从时序特征中提取收益率（label 即下一期收益率）
+        returns = data['labels'].numpy()
 
-        # 生成专家动作
+        # 生成专家动作（启发式贪婪策略，对应论文 Algorithm 1）
         expert_actions = generate_expert_strategy(
             returns=returns,
-            industry_relation_matrix=industry_relation_matrix,
+            industry_relation_matrix=ind_matrix,
             correlation_matrix=correlation_matrix
         )
 
