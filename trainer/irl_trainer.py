@@ -186,6 +186,78 @@ class GAILTrainer:
 
 
 # --------------------------------------------------------------------------
+# Bradley-Terry reward learner
+# --------------------------------------------------------------------------
+class BradleyTerryTrainer:
+    """Pairwise preference reward learner using the Bradley-Terry model.
+
+    Loss: L = -mean( logsigmoid(R_expert - R_agent) )
+
+    Only the *difference* between expert and agent rewards matters, so
+    absolute magnitude never drifts — avoids the instability of MaxEnt IRL
+    without needing an adversarial discriminator like GAIL.
+    Uses the same MultiRewardNetwork backbone as IRL.
+    """
+
+    def __init__(self, reward_net, expert_data, lr=1e-4, grad_clip=1.0):
+        self.reward_net = reward_net
+        self.expert_data = expert_data
+        self.optimizer = torch.optim.Adam(reward_net.parameters(), lr=lr)
+        self.grad_clip = grad_clip
+
+    def _calculate_rewards(self, trajectories, device):
+        rewards = []
+        for state, action in trajectories:
+            state_tensor = torch.as_tensor(np.asarray(state), dtype=torch.float32, device=device)
+            action_tensor = torch.as_tensor(np.asarray(action), dtype=torch.float32, device=device)
+            rewards.append(self.reward_net(state_tensor, action_tensor).reshape(-1))
+        return torch.cat(rewards)
+
+    def _generate_agent_trajectories(self, env, model, n_steps):
+        trajectories = []
+        obs = env.reset()
+        num_stocks = obs.shape[-2]
+        for _ in range(n_steps):
+            action, _ = model.predict(obs)
+            next_obs, reward, done, _ = env.step(action)
+            action_multi_hot = np.zeros(num_stocks, dtype=np.float32)
+            act = np.atleast_2d(action)
+            for k in range(act.shape[-1]):
+                action_multi_hot[int(act[0, k])] = 1.0
+            trajectories.append((obs[0].copy(), action_multi_hot))
+            obs = next_obs
+            if np.any(done):
+                obs = env.reset()
+        return trajectories
+
+    def train_step(self, agent_envs, model, batch_size=64, device='cuda:0'):
+        agent_traj = []
+        per_env = max(1, batch_size // len(agent_envs))
+        for env in agent_envs:
+            agent_traj += self._generate_agent_trajectories(env, model, per_env)
+
+        n_expert = min(batch_size, len(self.expert_data))
+        idx = np.random.choice(len(self.expert_data), size=n_expert, replace=False)
+        expert_batch = [self.expert_data[i] for i in idx]
+
+        expert_rewards = self._calculate_rewards(expert_batch, device)
+        agent_rewards = self._calculate_rewards(agent_traj, device)
+
+        n = min(expert_rewards.shape[0], agent_rewards.shape[0])
+        loss = -F.logsigmoid(expert_rewards[:n] - agent_rewards[:n]).mean()
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.reward_net.parameters(), self.grad_clip)
+        self.optimizer.step()
+        return {
+            'loss': loss.item(),
+            'expert_reward': expert_rewards.mean().item(),
+            'agent_reward': agent_rewards.mean().item(),
+        }
+
+
+# --------------------------------------------------------------------------
 # Maximum-Entropy IRL
 # --------------------------------------------------------------------------
 class MaxEntIRL:
@@ -257,6 +329,63 @@ class MaxEntIRL:
             'expert_reward': expert_rewards.mean().item(),
             'agent_reward': agent_rewards.mean().item(),
         }
+
+
+# --------------------------------------------------------------------------
+# Reward normalization
+# --------------------------------------------------------------------------
+class RunningNormalizer:
+    """Online mean/variance tracker (Welford's algorithm).
+
+    Keeps a running estimate of the reward distribution so the normalized
+    output always has approximately mean=0 and std=1, regardless of how
+    the reward network's output scale drifts during training.
+    """
+
+    def __init__(self, eps=1e-8):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 0
+        self.eps = eps
+
+    def update(self, x: torch.Tensor):
+        vals = x.detach().cpu().numpy().flatten()
+        n = len(vals)
+        if n == 0:
+            return
+        batch_mean = float(vals.mean())
+        batch_var = float(vals.var()) if n > 1 else 0.0
+        new_count = self.count + n
+        delta = batch_mean - self.mean
+        self.mean += delta * n / new_count
+        self.var = (self.var * self.count + batch_var * n
+                    + delta ** 2 * self.count * n / new_count) / new_count
+        self.count = new_count
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        return (x - self.mean) / (self.var ** 0.5 + self.eps)
+
+
+class NormalizedRewardNet(nn.Module):
+    """Wraps a reward network and normalizes its output with running stats.
+
+    The loss trainers (MaxEntIRL, BradleyTerryTrainer) hold a reference to
+    the *unwrapped* net so their gradients are computed on raw rewards.
+    The env receives this wrapper so PPO always sees a stable reward scale.
+    """
+
+    def __init__(self, reward_net):
+        super().__init__()
+        self.net = reward_net
+        self.normalizer = RunningNormalizer()
+
+    def forward(self, state, action):
+        r = self.net(state, action)
+        self.normalizer.update(r)
+        return self.normalizer.normalize(r)
+
+    def beta(self):
+        return self.net.beta()
 
 
 # --------------------------------------------------------------------------
@@ -359,11 +488,12 @@ def evaluate_on_loader(args, model, loader, verbose=False):
 # --------------------------------------------------------------------------
 def train_model_and_predict(model, args, train_loader, val_loader, test_loader,
                             writer=None, run_dir=None):
-    """PPO + one of three reward setups, picked by ``args.reward``:
+    """PPO + one of four reward setups, picked by ``args.reward``:
 
       'irl'         -- MaxEnt IRL on the heuristic expert (paper §3.3)
       'closed_form' -- paper §3.2 analytical reward, no learned net
       'gail'        -- GAIL discriminator, bounded reward via softplus
+      'bt'          -- Bradley-Terry pairwise preference loss
     """
     method = getattr(args, "reward", "irl")
     print(f"[reward mode] {method}")
@@ -388,7 +518,7 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader,
                 ind_yn=args.ind_yn, pos_yn=args.pos_yn, neg_yn=args.neg_yn,
             ).to(args.device)
             rew_trainer = GAILTrainer(reward_net, expert_trajectories, lr=args.irl_lr)
-        else:  # 'irl'
+        else:  # 'irl' or 'bt'
             obs_len = args.input_dim
             for flag in (args.ind_yn, args.pos_yn, args.neg_yn):
                 if flag:
@@ -400,10 +530,15 @@ def train_model_and_predict(model, args, train_loader, val_loader, test_loader,
                     input_dim=args.input_dim, num_stocks=args.num_stocks,
                     ind_yn=args.ind_yn, pos_yn=args.pos_yn, neg_yn=args.neg_yn,
                 ).to(args.device)
-            rew_trainer = MaxEntIRL(reward_net, expert_trajectories, lr=args.irl_lr)
+            if method == "bt":
+                rew_trainer = BradleyTerryTrainer(reward_net, expert_trajectories, lr=args.irl_lr)
+            else:
+                rew_trainer = MaxEntIRL(reward_net, expert_trajectories, lr=args.irl_lr)
 
         train_data = next(iter(train_loader))
-        train_env_obj = _build_env(args, train_data, reward_net=reward_net, mode="train")
+        env_reward_net = (NormalizedRewardNet(reward_net)
+                          if getattr(args, "normalize_reward", False) else reward_net)
+        train_env_obj = _build_env(args, train_data, reward_net=env_reward_net, mode="train")
 
     train_env, _ = train_env_obj.get_sb_env()
 

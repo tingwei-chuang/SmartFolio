@@ -32,7 +32,7 @@ def build_args():
     p.add_argument("--market", default="sp500")
     p.add_argument("--policy", required=True, choices=["MLP", "HGAT"])
     p.add_argument("--reward", default="irl",
-                   choices=["irl", "closed_form", "gail"])
+                   choices=["irl", "closed_form", "gail", "bt"])
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--test_start", default="2024-01-01")

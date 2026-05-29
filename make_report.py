@@ -47,11 +47,11 @@ def main():
 
     # --- SmartFolio agent runs (all reward methods, both checkpoints) ---
     for pol in ["HGAT", "MLP"]:
-        for rew in ["irl", "closed_form", "gail"]:
+        for rew in ["irl", "closed_form", "gail", "bt"]:
             for which, suffix in [("final", "final"), ("bestval", "best-val")]:
                 try:
                     m, nv = load_agent(market, pol, reward=rew, which=which)
-                    rew_label = {"irl": "IRL", "closed_form": "CF", "gail": "GAIL"}[rew]
+                    rew_label = {"irl": "IRL", "closed_form": "CF", "gail": "GAIL", "bt": "BT"}[rew]
                     key = f"SmartFolio-{pol}-{rew_label} ({suffix})"
                     results[key] = m
                     curves[key] = nv
@@ -90,9 +90,11 @@ def main():
         "SmartFolio-HGAT-IRL (final)":  dict(lw=2.4, color="#c0392b"),
         "SmartFolio-HGAT-CF (final)":   dict(lw=2.4, color="#2980b9"),
         "SmartFolio-HGAT-GAIL (final)": dict(lw=2.4, color="#27ae60"),
+        "SmartFolio-HGAT-BT (final)":   dict(lw=2.4, color="#8e44ad"),
         "SmartFolio-MLP-IRL (final)":   dict(lw=1.4, color="#c0392b", ls="--", alpha=0.7),
         "SmartFolio-MLP-CF (final)":    dict(lw=1.4, color="#2980b9", ls="--", alpha=0.7),
         "SmartFolio-MLP-GAIL (final)":  dict(lw=1.4, color="#27ae60", ls="--", alpha=0.7),
+        "SmartFolio-MLP-BT (final)":    dict(lw=1.4, color="#8e44ad", ls="--", alpha=0.7),
         "EqualWeight(1/N)":             dict(lw=1.8, color="#2c3e50"),
         "BuyAndHold":                   dict(lw=1.2, color="#16a085", ls="--"),
         "Momentum-topk":                dict(lw=1.2, color="#8e44ad", ls=":"),
@@ -130,9 +132,11 @@ def write_report(market, table, curves):
         "SmartFolio-HGAT-IRL (final)",  "SmartFolio-HGAT-IRL (best-val)",
         "SmartFolio-HGAT-CF (final)",   "SmartFolio-HGAT-CF (best-val)",
         "SmartFolio-HGAT-GAIL (final)", "SmartFolio-HGAT-GAIL (best-val)",
+        "SmartFolio-HGAT-BT (final)",   "SmartFolio-HGAT-BT (best-val)",
         "SmartFolio-MLP-IRL (final)",   "SmartFolio-MLP-IRL (best-val)",
         "SmartFolio-MLP-CF (final)",    "SmartFolio-MLP-CF (best-val)",
         "SmartFolio-MLP-GAIL (final)",  "SmartFolio-MLP-GAIL (best-val)",
+        "SmartFolio-MLP-BT (final)",    "SmartFolio-MLP-BT (best-val)",
         "EqualWeight(1/N)", "BuyAndHold", "Momentum-topk", "Random-topk",
     ] if n in table.index]
     final_wealth = {n: curves[n][-1] for n in order if n in curves}

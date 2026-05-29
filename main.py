@@ -61,9 +61,12 @@ def get_args():
     p.add_argument("--n_steps", type=int, default=0, help="PPO rollout length (0=default)")
     # reward source
     p.add_argument("--reward", default="irl",
-                   choices=["irl", "closed_form", "gail"],
+                   choices=["irl", "closed_form", "gail", "bt"],
                    help="reward signal: MaxEnt IRL (paper §3.3, default), "
-                        "closed-form §3.2 formula, or GAIL discriminator")
+                        "closed-form §3.2 formula, GAIL discriminator, "
+                        "or Bradley-Terry pairwise preference")
+    p.add_argument("--normalize_reward", default="n",
+                   help="normalize reward to mean=0 std=1 before PPO (y/n)")
     # closed-form reward weights (paper §3.2 lambdas)
     p.add_argument("--lambda_return", type=float, default=1.0)
     p.add_argument("--lambda_div",    type=float, default=0.1)
@@ -79,6 +82,7 @@ def main():
     args.ind_yn = str2bool(args.ind_yn)
     args.pos_yn = str2bool(args.pos_yn)
     args.neg_yn = str2bool(args.neg_yn)
+    args.normalize_reward = str2bool(args.normalize_reward)
     args.multi_reward = str2bool(args.multi_reward)
     args.model_name = "SmartFolio"
     set_seed(args.seed)
